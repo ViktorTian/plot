@@ -689,14 +689,14 @@ def visualize_tsne(model_da, data_loader, device, output_dir, epoch):
         for imgs, labs in data_loader:
             for i in range(imgs.size(0)):
                 img = imgs[i:i+1].to(device)      # batch=1
-                functional.reset_net(model_da)    # 重置所有 v
+                functional.reset_net(model_da)    # 重置所有状态
                 _ = model_da(img)
                 f = model_da.out.clone().cpu()    # [1, C]
                 feats.append(f)
-                labels.append(labs[i].unsqueeze(0))
+                labels.append(labs[i].unsqueeze(0))  # labs 本身在 CPU
 
     X = torch.cat(feats, dim=0).numpy()      # [N, C]
-    L = torch.cat(labels, dim=0).numpy()     # [N]
+    L = torch.cat(labels, dim=0).cpu().numpy()  # <— 在这里加上 .cpu()
 
     Z = TSNE(n_components=2,
              perplexity=30,
@@ -709,6 +709,8 @@ def visualize_tsne(model_da, data_loader, device, output_dir, epoch):
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'tsne_da_epoch{epoch}.pdf'), dpi=300)
     plt.close()
+
+
 def visualize_raster(model_da, data_loader, device, output_dir, epoch):
     """
     只对 DA-SSDP 模型画 Spike Raster。逐样本前向，hook 所有 LIF/PLIF。
