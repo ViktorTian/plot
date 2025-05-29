@@ -42,6 +42,8 @@ from collections import defaultdict
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import torch
+from models.submodules.layers import LIFWithTiming, PLIF
+
 
 
 def parse_args():
@@ -680,26 +682,31 @@ def cos_annealing_factor(epoch, total_epochs, start_factor, end_factor):
 def visualize_tsne(model_da, data_loader, device, output_dir, epoch):
     """
     只对 DA-SSDP 模型画 t-SNE。
+    特征从 model_da.out 里获取（forward 结束时写回的平均时序特征）。
     """
     model_da.eval()
     feats, labels = [], []
+
     with torch.no_grad():
         for imgs, labs in data_loader:
             imgs = imgs.to(device)
-            # 假设你的模型实现里 forward_with_feats 返回 (logits, feature_vector)
-            _, f = model_da.forward_with_feats(imgs)
-            feats.append(f.cpu())
+            _ = model_da(imgs)                # 前向，结果存在 model_da.out
+            f = model_da.out.clone().cpu()    # [B, C]
+            feats.append(f)
             labels.append(labs)
-    X = torch.cat(feats).numpy()
-    L = torch.cat(labels).numpy()
-    Z = TSNE(n_components=2, perplexity=30, learning_rate=200, n_iter=1000).fit_transform(X)
+
+    X = torch.cat(feats, dim=0).numpy()     # [N, C]
+    L = torch.cat(labels, dim=0).numpy()    # [N]
+
+    Z = TSNE(n_components=2, perplexity=30,
+             learning_rate=200, n_iter=1000).fit_transform(X)
+
     plt.figure(figsize=(6,6))
     plt.scatter(Z[:,0], Z[:,1], c=L, s=5, alpha=0.6)
     plt.title(f't-SNE (DA-SSDP, epoch {epoch})')
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'tsne_da_epoch{epoch}.pdf'), dpi=300)
     plt.close()
-
 def visualize_raster(model_da, data_loader, device, output_dir, epoch):
     """
     只对 DA-SSDP 模型画 Spike Raster。
