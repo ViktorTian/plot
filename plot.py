@@ -948,7 +948,7 @@ def main():
 
     logger.info('Training completed.')
 
-   ##################################################
+     ##################################################
     #        t-SNE & Spike Raster Visualization
     ##################################################
 
@@ -959,27 +959,27 @@ def main():
             T=args.T,
             num_classes=num_classes,
             img_size=input_size[-1],
-        ).to(next(model.parameters()).device)
+        ).cuda()
         ckpt_da = torch.load(
             os.path.join(args.output_dir, 'checkpoint_max_acc1.pth'),
             map_location='cpu'
         )
         model_da.load_state_dict(ckpt_da['model'])
 
-        # 可视化并保存高分辨率 PDF
+        # visualize and save high-res PDFs
         visualize_tsne(
             model_da,
             data_loader_test,
             next(model_da.parameters()).device,
             args.output_dir,
-            epoch=args.epochs-1
+            args.epochs-1
         )
         visualize_raster(
             model_da,
             data_loader_test,
             next(model_da.parameters()).device,
             args.output_dir,
-            epoch=args.epochs-1
+            args.epochs-1
         )
 
     ##################################################
