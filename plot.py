@@ -681,25 +681,27 @@ def cos_annealing_factor(epoch, total_epochs, start_factor, end_factor):
 
 def visualize_tsne(model_da, data_loader, device, output_dir, epoch):
     """
-    只对 DA-SSDP 模型画 t-SNE。
-    特征从 model_da.out 里获取（forward 结束时写回的平均时序特征）。
+    只对 DA-SSDP 模型画 t-SNE。逐样本前向，特征取自 model_da.out。
     """
     model_da.eval()
     feats, labels = [], []
-
     with torch.no_grad():
         for imgs, labs in data_loader:
-            imgs = imgs.to(device)
-            _ = model_da(imgs)                # 前向，结果存在 model_da.out
-            f = model_da.out.clone().cpu()    # [B, C]
-            feats.append(f)
-            labels.append(labs)
+            for i in range(imgs.size(0)):
+                img = imgs[i:i+1].to(device)      # batch=1
+                functional.reset_net(model_da)    # 重置所有 v
+                _ = model_da(img)
+                f = model_da.out.clone().cpu()    # [1, C]
+                feats.append(f)
+                labels.append(labs[i].unsqueeze(0))
 
-    X = torch.cat(feats, dim=0).numpy()     # [N, C]
-    L = torch.cat(labels, dim=0).numpy()    # [N]
+    X = torch.cat(feats, dim=0).numpy()      # [N, C]
+    L = torch.cat(labels, dim=0).numpy()     # [N]
 
-    Z = TSNE(n_components=2, perplexity=30,
-             learning_rate=200, n_iter=1000).fit_transform(X)
+    Z = TSNE(n_components=2,
+             perplexity=30,
+             learning_rate=200,
+             n_iter=1000).fit_transform(X)
 
     plt.figure(figsize=(6,6))
     plt.scatter(Z[:,0], Z[:,1], c=L, s=5, alpha=0.6)
@@ -709,21 +711,30 @@ def visualize_tsne(model_da, data_loader, device, output_dir, epoch):
     plt.close()
 def visualize_raster(model_da, data_loader, device, output_dir, epoch):
     """
-    只对 DA-SSDP 模型画 Spike Raster。
+    只对 DA-SSDP 模型画 Spike Raster。逐样本前向，hook 所有 LIF/PLIF。
     """
+    model_da.eval()
     rec = []
-    def hook(module, inp, out):
-        # 收集每个 time-step, batch 内所有神经元的激发情况
-        rec.append((out>0).float().reshape(out.size(0), -1).cpu())
-    # 在所有 LIFWithTiming/PLIF 上注册 hook
-    for m in model_da.modules():
-        if isinstance(m, (LIFWithTiming, PLIF)):
-            m.register_forward_hook(hook)
-    # 只取一个 batch
+
+    # 注册 hook
+    def hook_fn(module, inp, out):
+        # out: [T, 1, ...] 或 [T,1] 视具体层而定，我们 flatten time×neurons
+        spikes = (out>0).float().reshape(out.size(0), -1).cpu()  # [T, N_neurons]
+        rec.append(spikes)
+
+    for layer in model_da.modules():
+        if isinstance(layer, (LIFWithTiming, PLIF)):
+            layer.register_forward_hook(hook_fn)
+
+    # 取第一个 batch 里的第一个样本
     imgs, _ = next(iter(data_loader))
+    x = imgs[0:1].to(device)   # batch=1
+    functional.reset_net(model_da)
     with torch.no_grad():
-        _ = model_da(imgs.to(device))
-    spikes = torch.cat(rec, dim=1)  # [T, neurons]
+        _ = model_da(x)
+
+    # 拼接所有层的 spike_seq 并画图
+    spikes = torch.cat(rec, dim=1)   # [T, total_neurons]
     t_idx, n_idx = (spikes>0).nonzero(as_tuple=True)
     plt.figure(figsize=(5,3))
     plt.scatter(t_idx.numpy(), n_idx.numpy(), s=1)
@@ -733,7 +744,6 @@ def visualize_raster(model_da, data_loader, device, output_dir, epoch):
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'raster_da_epoch{epoch}.pdf'), dpi=300)
     plt.close()
-
 
 def main():
 
@@ -951,9 +961,7 @@ def main():
      ##################################################
     #        t-SNE & Spike Raster Visualization
     ##################################################
-
     if is_main_process():
-        # 只加载 DA-SSDP 模型
         model_da = create_model(
             args.model,
             T=args.T,
@@ -966,20 +974,19 @@ def main():
         )
         model_da.load_state_dict(ckpt_da['model'])
 
-        # visualize and save high-res PDFs
         visualize_tsne(
             model_da,
             data_loader_test,
             next(model_da.parameters()).device,
             args.output_dir,
-            args.epochs-1
+            args.epochs - 1
         )
         visualize_raster(
             model_da,
             data_loader_test,
             next(model_da.parameters()).device,
             args.output_dir,
-            args.epochs-1
+            args.epochs - 1
         )
 
     ##################################################
