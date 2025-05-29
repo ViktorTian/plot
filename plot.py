@@ -677,67 +677,55 @@ def cos_annealing_factor(epoch, total_epochs, start_factor, end_factor):
     factor = end_factor + (start_factor - end_factor) * cos_part
     return factor
 
-def visualize_tsne(model_base, model_da, data_loader, device, output_dir, epoch):
-    model_base.eval(); model_da.eval()
-    feats_base, feats_da, labels = [], [], []
+def visualize_tsne(model_da, data_loader, device, output_dir, epoch):
+    """
+    只对 DA-SSDP 模型画 t-SNE。
+    """
+    model_da.eval()
+    feats, labels = [], []
     with torch.no_grad():
         for imgs, labs in data_loader:
             imgs = imgs.to(device)
-            # 假设 forward_with_feats 返回 (logits, feature_vector)
-            _, f_base = model_base.forward_with_feats(imgs)
-            _, f_da   = model_da  .forward_with_feats(imgs)
-            feats_base.append(f_base.cpu())
-            feats_da  .append(f_da.cpu())
-            labels    .append(labs)
-    feats_base = torch.cat(feats_base).numpy()
-    feats_da   = torch.cat(feats_da)  .numpy()
-    labels     = torch.cat(labels).numpy()
-    X = np.vstack([feats_base, feats_da])
-    Z = TSNE(n_components=2, perplexity=30,
-             learning_rate=200, n_iter=1000).fit_transform(X)
-    N = len(labels)
-    Zb, Zd = Z[:N], Z[N:]
+            # 假设你的模型实现里 forward_with_feats 返回 (logits, feature_vector)
+            _, f = model_da.forward_with_feats(imgs)
+            feats.append(f.cpu())
+            labels.append(labs)
+    X = torch.cat(feats).numpy()
+    L = torch.cat(labels).numpy()
+    Z = TSNE(n_components=2, perplexity=30, learning_rate=200, n_iter=1000).fit_transform(X)
     plt.figure(figsize=(6,6))
-    plt.scatter(Zb[:,0], Zb[:,1], c=labels, marker='o', s=5, alpha=0.6, label='baseline')
-    plt.scatter(Zd[:,0], Zd[:,1], c=labels, marker='^', s=5, alpha=0.6, label='DA-SSDP')
-    plt.legend(markerscale=2)
-    plt.title(f't-SNE Comparison (Epoch {epoch})')
+    plt.scatter(Z[:,0], Z[:,1], c=L, s=5, alpha=0.6)
+    plt.title(f't-SNE (DA-SSDP, epoch {epoch})')
     plt.tight_layout()
-    plt.savefig(f'{output_dir}/tsne_epoch{epoch}.pdf', format='pdf', dpi=300)
+    plt.savefig(os.path.join(output_dir, f'tsne_da_epoch{epoch}.pdf'), dpi=300)
     plt.close()
 
-def visualize_raster(model_base, model_da, data_loader, device, output_dir, epoch):
-    rec = {'baseline': [], 'da': []}
-
-    def make_hook(name):
-        def hook(module, inp, out):
-            spikes = (out[:,0] > 0).float().reshape(out.size(0), -1).cpu()
-            rec[name].append(spikes)
-        return hook
-
-    for name, m in [('baseline', model_base), ('da', model_da)]:
-        for layer in m.modules():
-            if isinstance(layer, (LIFWithTiming, PLIF)):
-                layer.register_forward_hook(make_hook(name))
-
+def visualize_raster(model_da, data_loader, device, output_dir, epoch):
+    """
+    只对 DA-SSDP 模型画 Spike Raster。
+    """
+    rec = []
+    def hook(module, inp, out):
+        # 收集每个 time-step, batch 内所有神经元的激发情况
+        rec.append((out>0).float().reshape(out.size(0), -1).cpu())
+    # 在所有 LIFWithTiming/PLIF 上注册 hook
+    for m in model_da.modules():
+        if isinstance(m, (LIFWithTiming, PLIF)):
+            m.register_forward_hook(hook)
+    # 只取一个 batch
     imgs, _ = next(iter(data_loader))
-    x = imgs[0:1].to(device)
-    model_base.eval(); model_da.eval()
     with torch.no_grad():
-        _ = model_base(x)
-        _ = model_da(x)
-
-    for name in ['baseline', 'da']:
-        spikes = torch.cat(rec[name], dim=1)  # [T, neurons]
-        t_idx, n_idx = (spikes>0).nonzero(as_tuple=True)
-        plt.figure(figsize=(5,3))
-        plt.scatter(t_idx.numpy(), n_idx.numpy(), s=1)
-        plt.xlabel('time step'); plt.ylabel('neuron idx')
-        plt.title(f'Spike Raster ({name}, epoch {epoch})')
-        plt.tight_layout()
-        plt.savefig(f'{output_dir}/raster_{name}_epoch{epoch}.pdf', format='pdf', dpi=300)
-        plt.close()
-
+        _ = model_da(imgs.to(device))
+    spikes = torch.cat(rec, dim=1)  # [T, neurons]
+    t_idx, n_idx = (spikes>0).nonzero(as_tuple=True)
+    plt.figure(figsize=(5,3))
+    plt.scatter(t_idx.numpy(), n_idx.numpy(), s=1)
+    plt.xlabel('time step')
+    plt.ylabel('neuron idx')
+    plt.title(f'Spike Raster (DA-SSDP, epoch {epoch})')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'raster_da_epoch{epoch}.pdf'), dpi=300)
+    plt.close()
 
 
 def main():
@@ -953,38 +941,37 @@ def main():
 
     logger.info('Training completed.')
 
-    ##################################################
+   ##################################################
     #        t-SNE & Spike Raster Visualization
     ##################################################
 
     if is_main_process():
-        # load baseline (no SSDP) and DA-SSDP models
-        model_base = create_model(
-            args.model, T=args.T,
-            num_classes=num_classes, img_size=input_size[-1]
-        ).cuda()
+        # 只加载 DA-SSDP 模型
         model_da = create_model(
-            args.model, T=args.T,
-            num_classes=num_classes, img_size=input_size[-1]
-        ).cuda()
-        ckpt_base = torch.load(f'{args.output_dir}/checkpoint_base_epoch{args.epochs-1}.pth',
-                               map_location='cpu')
-        ckpt_da   = torch.load(f'{args.output_dir}/checkpoint_max_acc1.pth',
-                               map_location='cpu')
-        model_base.load_state_dict(ckpt_base['model'])
+            args.model,
+            T=args.T,
+            num_classes=num_classes,
+            img_size=input_size[-1],
+        ).to(next(model.parameters()).device)
+        ckpt_da = torch.load(
+            os.path.join(args.output_dir, 'checkpoint_max_acc1.pth'),
+            map_location='cpu'
+        )
         model_da.load_state_dict(ckpt_da['model'])
 
-        # visualize and save high-res PDFs
+        # 可视化并保存高分辨率 PDF
         visualize_tsne(
-            model_base, model_da, data_loader_test,
-            device=next(model_da.parameters()).device,
-            output_dir=args.output_dir,
+            model_da,
+            data_loader_test,
+            next(model_da.parameters()).device,
+            args.output_dir,
             epoch=args.epochs-1
         )
         visualize_raster(
-            model_base, model_da, data_loader_test,
-            device=next(model_da.parameters()).device,
-            output_dir=args.output_dir,
+            model_da,
+            data_loader_test,
+            next(model_da.parameters()).device,
+            args.output_dir,
             epoch=args.epochs-1
         )
 
