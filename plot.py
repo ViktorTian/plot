@@ -713,35 +713,44 @@ def visualize_tsne(model_da, data_loader, device, output_dir, epoch):
 
 def visualize_raster(model_da, data_loader, device, output_dir, epoch):
     """
-    只对 DA-SSDP 模型画 Spike Raster。逐样本前向，hook 所有 LIF/PLIF。
+    只对 DA-SSDP 模型画 Spike Raster。  
+    rec['da'] 会保存每一层每个 time step 的 spikes（batchsize=1）。
     """
     model_da.eval()
-    rec = []
+    rec = {'da': []}
 
-    # 注册 hook
-    def hook_fn(module, inp, out):
-        # out: [T, 1, ...] 或 [T,1] 视具体层而定，我们 flatten time×neurons
-        spikes = (out>0).float().reshape(out.size(0), -1).cpu()  # [T, N_neurons]
-        rec.append(spikes)
+    # hook：把每次输出的 spikes 拉成 [1, neurons] 并存到 rec['da']
+    def make_hook(module, inp, out):
+        # out: [T, 1, C, H, W] 或 [T,1,dim] 视你注册在哪一层
+        # 先把 T×1×… 展平成 [T, N]，这里以第一维 time 叠加所有神经元：
+        spikes = (out > 0).float().view(out.size(0), -1).cpu()  # [T, N]
+        rec['da'].append(spikes)
 
+    # 在所有 LIFWithTiming/PLIF 层上注册 hook
     for layer in model_da.modules():
         if isinstance(layer, (LIFWithTiming, PLIF)):
-            layer.register_forward_hook(hook_fn)
+            layer.register_forward_hook(make_hook)
 
-    # 取第一个 batch 里的第一个样本
+    # 取一个样本跑一次前向
     imgs, _ = next(iter(data_loader))
-    x = imgs[0:1].to(device)   # batch=1
+    x = imgs[0:1].to(device)
     functional.reset_net(model_da)
     with torch.no_grad():
         _ = model_da(x)
 
-    # 拼接所有层的 spike_seq 并画图
-    spikes = torch.cat(rec, dim=1)   # [T, total_neurons]
-    t_idx, n_idx = (spikes>0).nonzero(as_tuple=True)
-    plt.figure(figsize=(5,3))
+    # 拼接并画图
+    if len(rec['da']) == 0:
+        print(f"[Warning] 没有记录到任何 spikes，可能 hook 没注册成功，跳过绘图")
+        return
+
+    # rec['da'] 是一个 list，每个元素 [T, N]
+    spikes = torch.cat(rec['da'], dim=1)  # [T, total_neurons]
+    t_idx, n_idx = (spikes > 0).nonzero(as_tuple=True)
+
+    plt.figure(figsize=(6, 4))
     plt.scatter(t_idx.numpy(), n_idx.numpy(), s=1)
     plt.xlabel('time step')
-    plt.ylabel('neuron idx')
+    plt.ylabel('neuron index')
     plt.title(f'Spike Raster (DA-SSDP, epoch {epoch})')
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'raster_da_epoch{epoch}.pdf'), dpi=300)
